@@ -144,14 +144,45 @@ class GDBDebugger(Debugger):
         self._skip_std_files()
         self.tracer = GDBTracer(self.inp, files=self.files)
 
-
 CALL = 'callq'
 RETURN = 'retq'
 LINE = 'line'
-ARG_REGISTERS = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+ARG_REGISTERS = ['rax',  'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+
+ADDR_COUNTER_ = 0
+F_ADDR_COUNTER_ = 0
+L_ADDR_COUNTER = 0
+
+ADDR_STORE = {}
+F_ADDR_STORE = {}
+L_ADDR_STORE = {}
 
 
-
+def get_addr(addr):
+    global ADDR_COUNTER_
+    if addr in ADDR_STORE: return ADDR_STORE[addr]
+    ADDR_COUNTER_ += 1
+    ADDR_STORE[addr] = ADDR_COUNTER_
+    return ADDR_STORE[addr]
+def get_fn_addr(addr):
+    global F_ADDR_COUNTER_
+    if addr in F_ADDR_STORE: return F_ADDR_STORE[addr]
+    F_ADDR_COUNTER_ += 1
+    F_ADDR_STORE[addr] = F_ADDR_COUNTER_
+    return F_ADDR_STORE[addr]
+def get_fn(fnaddr):
+    aid = get_fn_addr(fnaddr)
+    return "fn_%d" % aid
+def get_var(varaddr):
+    aid = get_addr(varaddr)
+    return "var_%d" % aid
+def get_lno(addr):
+    global L_ADDR_COUNTER
+    if addr in L_ADDR_STORE: return 'a_%d' % (L_ADDR_STORE[addr])
+    L_ADDR_COUNTER += 1
+    L_ADDR_STORE[addr] = L_ADDR_COUNTER
+    s = 'a_%d' % (L_ADDR_STORE[addr])
+    return s
 
 class StrippedContext(GDBContext):
     def __init__(self, frame):
@@ -172,10 +203,9 @@ class Frame:
         self._instr = instr
         self.arguments = []
         self.locals_vars = {}
-        self.line_no = 0
+        self.line_no = None
         self.file_name = None
         self.function = None
-        self.event = None
         self.reassignment = AssignmentVars('')
         self._parse()  
 class Frame(Frame):
@@ -188,8 +218,8 @@ class Frame(Frame):
                 if j == ':':
                     v = val[i + 1:]
                     break
-            new_var = '%d_%s' % (l_no, r)
-            return (new_var, v.strip('"'))
+            var = get_var(l_no)
+            return (var, v.strip('"'))
         except Exception:
             return     
 class Frame(Frame):
@@ -204,20 +234,18 @@ class Frame(Frame):
         }
 class Frame(Frame):
     def _parse(self):
-        self.function = self._instr.pointed_address
-        self.line_no = int(self._instr.current_address.strip(':'), 16)
+        self.function = get_fn(self._instr.pointed_address)
+        self.line_no = get_lno(self._instr.current_address.strip(':'))
         self.arguments = self._read_arg_register()
-        self.event = self._instr.event_type
-        self.file_name = "a.out"  #CHANGE LINE
+        self.file_name = "a.out"  
         self.locals_vars.update(self.arguments)
 class Frame(Frame):
     def update(self, instr):
-        self.line_no = int(instr.current_address.strip(':'), 16)
-        self.event = 'line' #change line
+        self.line_no = get_lno(instr.current_address.strip(':'))
         x = instr.dest_reg
         
         try:
-            addr, val = self._read_register(x, self.line_no)
+            addr, val = self._read_register(x, self.line_no) 
             if addr in self.locals_vars.keys() and self.locals_vars[addr] != val:
                 self.reassignment[addr] = val
                 for k, v in self.reassignment.defs.items():
@@ -228,32 +256,21 @@ class Frame(Frame):
                 self.locals_vars[addr] = val       
         except:
             return
-
 class Instruction:
     def __init__(self, instr):
         self.symbol_name = None
         self.pointed_address = None
         self.dest_reg = None
-        self.event_type = None
         self._parse(instr)
-class Instruction(Instruction):
-    def _assign_event(self, e):
-        if e == CALL:
-            return 'call'
-        elif e == RETURN:
-            return 'return'
-        else:
-            return 'line'
 class Instruction(Instruction):
     def _parse(self, instr):
         instr_list = instr.split()
         instr_list.pop(0)
 
         self.current_address = instr_list[0]
-        instr_type = instr_list[1]
-        self.event_type = self._assign_event(instr_type)
+        self.instr_type = instr_list[1]
 
-        if 'mov' in instr_type:
+        if 'mov' in self.instr_type:
             d = instr_list[2]
             if d[-1] != ')':
                 self.dest_reg = d[-3:]
@@ -262,19 +279,18 @@ class Instruction(Instruction):
             else:
                 self.dest_reg = d[-4:-1]
 
-        elif instr_type == 'callq':
+        elif self.instr_type == 'callq':
             self.pointed_address = instr_list[2]
             if len(instr_list) > 3:
                 self.symbol_name = instr_list[-1]
 
-        elif instr_type == 'push':
+        elif self.instr_type == 'push':
             d = instr_list[2]
             self.dest_reg = d[1:]
 
-        elif instr_type == 'cmpq':
+        elif self.instr_type == 'cmpq':
             d = instr_list[2]
             self.dest_reg = d[-4:-1]
-
 class StrippedBinaryDebugger(GDBDebugger):
     def __init__(self, gdb, binary, inp, **kwargs):
         super().__init__(gdb, binary, inp, **kwargs)
@@ -288,17 +304,15 @@ class StrippedBinaryDebugger(StrippedBinaryDebugger):
         start, end = self.get_address_range()
         nexti = ''
         current_frame = None
-
         while True:
             try:
                 self.step()
                 nexti = self.get_instruction()
                 if self.in_scope(nexti, start, end):
                     h = Instruction(nexti)
-                    if h.event_type == CALL:
+                    if h.instr_type == 'callq':
                         if h.symbol_name != None:
-                            self.step()
-                            self.finish()
+                            self.nexti()
                             continue
                         else:
                             current_frame = Frame(h, self.inp)
@@ -314,7 +328,15 @@ class StrippedBinaryDebugger(StrippedBinaryDebugger):
             except gdb.error:
                 break
     def get_event (self, frame):
-        return frame.event
+        fname = frame.function
+        if fname not in self.frames:
+            self.frames.append(fname)
+            return 'call'
+        elif fname == self.frames[-1]:
+            return 'line'
+        else:
+            self.frames.pop()
+            return 'return'
     def get_main(self):
         entry_addr = self.get_entry_point()
         self.break_at(entry_addr)
@@ -330,7 +352,6 @@ class StrippedBinaryDebugger(StrippedBinaryDebugger):
 
         instr = instructions[-1].split()
         return instr[-1]
-
     def get_instruction(self):
         return self.gdb.execute('x/i $rip', to_string=True)
     def get_entry_point(self):
@@ -374,8 +395,6 @@ class StrippedBinaryDebugger(StrippedBinaryDebugger):
             return True
         else:
             return False         
-
-
 
 file_name = 'gdbtrace'
 def recover_trace(f, inp, **kwargs):
