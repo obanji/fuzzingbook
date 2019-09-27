@@ -377,13 +377,12 @@ class StrippedBinaryDebugger(StrippedBinaryDebugger):
         start_addr = None
         end_addr = None
         mappings = self.gdb.execute('info proc mappings', to_string=True)
-        i = 1
-        for line in mappings.splitlines():
-            if i == 5:
+
+        for i, line in enumerate(mappings.splitlines()):
+            if i == 4:
                 start_addr = line.split()[0]
-            elif i ==7:
+            elif i == 6:
                 end_addr = line.split()[1]
-            i += 1
         return (start_addr, end_addr)
     def in_scope(self, instr, start, end):
         instr= instr.split()
